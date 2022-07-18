@@ -4,34 +4,41 @@ commands:
   destroy-environment:
     description: Destroy back-end and front-end cloudformation stacks given a workflow ID.
     parameters:
-      # Add parameter here   
+       #Add parameter here
+      workflow_id:
+        type: string
     steps:
       - run:
           name: Destroy environments
           when: on_fail
           command: |
             # Your code here
-            exit 1
+            aws cloudformation delete-stack --stack-name udapeople-backend-<<parameters.workflow_id>>
+            aws s3 rm s3://udapeople-<<parameters.workflow_id>> --recursive
+            aws cloudformation delete-stack --stack-name udapeople-frontend-<<parameters.workflow_id>>
 
   revert-migrations:
     description: Revert the last migration if successfully run in the current workflow.
     parameters:
-      # Add parameter here     
+     #  Add parameter here
+      workflow_id:
+        type: string
     steps:
       - run:
           name: Revert migrations
           # Add when this will run
+          when: on_fail
           command: |
             # Curl command here to see if there was a successful migration associated with the workflow id, store result in SUCCESS variable
-            SUCCESS = 1
+            # SUCCESS=$(curl -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" \
+            # --request GET https://api.memstash.io/values/DB_MIGRATION_<< parameters.workflow_id >>)
+            SUCCESS=$(curl --insecure https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/migration_<< parameters.workflow_id >>)
             if(( $SUCCESS==1 )); 
             then
-            #  cd ~/project/backend
-            #  npm install
-            #  Add revert code here. You can find this in the Getting Started section.
-              exit 1
+            cd backend
+            npm run migrations:revert
             fi
-            
+
 jobs:
   build-frontend:
     docker:
@@ -42,11 +49,11 @@ jobs:
           keys: [frontend-build]
       - run:
           name: Build front-end
+          working_directory: ./frontend
           command: |
-            cd frontend
-            npm install
+            npm i
             npm run build
-
+            pwd && ls -al
       - save_cache:
           paths: [frontend/node_modules]
           key: frontend-build
@@ -60,211 +67,366 @@ jobs:
           keys: [backend-build]
       - run:
           name: Back-end build
+          working_directory: ./backend
           command: |
-            cd backend
-            npm install
+            npm i
             npm run build
+            cp .env dist/.env
+            pwd && ls -al
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project/backend/dist
+            - project/backend/node_modules
       - save_cache:
           paths: [backend/node_modules]
           key: backend-build
 
   test-frontend:
     docker:
-      # Docker image here
+      - image: circleci/node:13.8.0
     steps:
-      # Checkout code from git
-      # Restore from cache
-      # Your job code here
-                
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: test-frontend
+          working_directory: ./frontend
+          command: |
+            npm i
+            npm run test
+
   test-backend:
     docker:
-      # Docker image here
+      - image: circleci/node:13.8.0
     steps:
-      # Checkout code from git
-      # Restore from cache
-      # Your job code here
-            
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: test-backend
+          working_directory: ./backend
+          command: |
+            npm i
+            npm run test
+
   scan-frontend:
     docker:
-      # Docker image here
+      - image: circleci/node:13.8.0
     steps:
-      # Checkout code from git
-      # Restore from cache
-      # Your job code here
-
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Front-end scan
+          working_directory: ./frontend
+          command: |
+            npm i
+            npm audit fix --audit-level=critical --force
+            # If the "npm audit fix" command above could not fix all critical vulnerabilities, try “npm audit fix --force” again
+            npm audit fix --force
+            npm audit --audit-level=critical
+            
   scan-backend:
     docker:
-      # Docker image here
+      - image: circleci/node:13.8.0
     steps:
-      # Checkout code from git
-      # Restore from cache
-      # Your job code here
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: Back-end scan
+          working_directory: ./backend
+          command: |
+            npm i
+            npm audit fix --audit-level=critical --force
+             #If the "npm audit fix" command above could not fix all critical vulnerabilities, try “npm audit fix --force” again
+            npm audit fix --force
+            npm audit --audit-level=critical
 
   deploy-infrastructure:
     docker:
-      # Docker image here that supports AWS CLI
+      - image: amazon/aws-cli
     steps:
-      # Checkout code from git
+      - checkout
+      - run:
+          name: Install tar utility
+          command: |
+            yum install -y tar gzip
       - run:
           name: Ensure back-end infrastructure exists
           command: |
             aws cloudformation deploy \
-              --template-file .circleci/files/backend.yml \
-              #--tags project=your-tag \
-              # --stack-name "your back-end stack name with workflow id" \
-              # --parameter-overrides ID="your workflow id"  
-              exit 1
+            --template-file .circleci/files/backend.yml \
+            --stack-name udapeople-backend-${CIRCLE_WORKFLOW_ID:0:7} \
+            --parameter-overrides ID=${CIRCLE_WORKFLOW_ID:0:7} \
+            --tags project=udapeople-backend-${CIRCLE_WORKFLOW_ID:0:7}
       - run:
           name: Ensure front-end infrastructure exist
           command: |
             aws cloudformation deploy \
-              --template-file .circleci/files/frontend.yml \
-              #--tags project=your-tag \
-              # --stack-name "your front-end stack name with workflow id" \
-              # --parameter-overrides ID="your workflow id"  
-              exit 1
+            --template-file .circleci/files/frontend.yml \
+            --stack-name udapeople-frontend-${CIRCLE_WORKFLOW_ID:0:7} \
+            --parameter-overrides ID=${CIRCLE_WORKFLOW_ID:0:7} \
+            --tags project=udapeople-frontend-${CIRCLE_WORKFLOW_ID:0:7}
       - run:
           name: Add back-end ip to ansible inventory
           command: |
-            # Your code here
-            exit 1
+            aws ec2 describe-instances \
+            --query 'Reservations[*].Instances[*].PublicIpAddress' \
+            --filters "Name=tag:Name,Values=backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+            --output text >> ~/project/.circleci/ansible/inventory.txt
+            cat ~/project/.circleci/ansible/inventory.txt
+      - run:
+           name: save the new back-end url to memory using memstach
+           command: |
+             backend_url=$(aws ec2 describe-instances \
+             --query 'Reservations[*].Instances[*].PublicIpAddress' \
+             --filters "Name=tag:Name,Values=backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+             --output text)
+             curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/backend_url -d 'http://${backend_url}:3030' 
+            #  curl -H "Content-Type: text/plain" \
+            #  -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" \
+            #  --request PUT \
+            #  --data "http://${backend_url}:3030" \
+            #  https://api.memstash.io/values/backend_url
       - persist_to_workspace:
           root: ~/
           paths:
             - project/.circleci/ansible/inventory.txt
-      # Here's where you will add some code to rollback on failure      
+      # Here's where you will add some code to rollback on failure
+      - destroy-environment:
+          workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
 
   configure-infrastructure:
-    docker:
-      # Docker image here that supports Ansible
-    steps:
-      # Checkout code from git
-      # Add ssh keys with fingerprint
-      # attach workspace
-      - run:
-          name: Install dependencies
-          command: |
-            # Your code here
-            exit 1
-      - run:
-          name: Configure server
-          command: |
-            # Your code here
-            exit 1
-      # Here's where you will add some code to rollback on failure      
+     docker:
+       - image: python:3.7-alpine3.11
+         environment:
+           NODE_ENV: "local"
+           VERSION: "1"
+           ENVIRONMENT: "production"
+           TYPEORM_CONNECTION: $TYPEORM_CONNECTION
+           TYPEORM_HOST: $TYPEORM_HOST
+           TYPEORM_USERNAME: $TYPEORM_USERNAME
+           TYPEORM_PASSWORD: $TYPEORM_PASSWORD
+           TYPEORM_DATABASE: $TYPEORM_DATABASE
+           TYPEORM_PORT: $TYPEORM_PORT
+           TYPEORM_ENTITIES: $TYPEORM_ENTITIES
+     steps:
+       - checkout
+       # Add ssh keys with fingerprint
+       - add_ssh_keys:
+           fingerprints: ["2f:b8:6e:02:57:ed:72:5e:21:f9:75:03:95:67:02:bb"]
+       - attach_workspace:
+           at: ~/
+       - run:
+           name: Install dependencies
+           command: |
+             apk add curl
+             apk add --upgrade bash
+             apk add --update ansible
+             apk add openssh-client
+             pip3 install awscli
+       - run:
+           name: Configure server
+           command: |
+             cat ~/project/.circleci/ansible/inventory.txt
+             export ANSIBLE_HOST_KEY_CHECKING=False
+             ansible-playbook -i ~/project/.circleci/ansible/inventory.txt ~/project/.circleci/ansible/configure-server.yml
+       # Here's where you will add some code to rollback on failure
+       - destroy-environment:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
 
   run-migrations:
-    docker:
-      # Docker image here that supports NodeJS
-    steps:
-      # Checkout code from git
-      - run:
-          name: Run migrations
-          command: |
-            # Your code here
-            exit 1
-      - run:
-          name: Send migration results to memstash
-          command: |
-            # Your code here
-            exit 1
-     # Here's where you will add some code to rollback on failure      
+     docker:
+       - image: sleavely/node-awscli:14.x
+     steps:
+       - checkout
+       - run:
+           name: Run migrations
+           command: |
+             cd backend
+             cat .env
+             npm i
+             npm run build
+             npm run migrations
+       - run:
+           name: Send migration results to memstash
+           command: |
+             echo "has been done successfully" > ./migration_status.txt
+             pwd && ls -al
+             if grep -q "has been done successfully" ./migration_status.txt 
+             then 
+               echo "has been done successfully"
+               curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/migrations-${CIRCLE_WORKFLOW_ID:0:7} -d "1"
+              # curl -H "Content-Type: text/plain" -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" --request PUT --data "1" https://api.memstash.io/values/migrations-${CIRCLE_WORKFLOW_ID:0:7}
+             else
+               echo "has failed"
+               curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/migrations-${CIRCLE_WORKFLOW_ID:0:7} -d "0"
+              # curl -H "Content-Type: text/plain" -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" --request PUT --data "0" https://api.memstash.io/values/migrations-${CIRCLE_WORKFLOW_ID:0:7}
+             fi
+        #Here's where you will add some code to rollback on failure
+       - destroy-environment:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
 
   deploy-frontend:
-    docker:
-      # Docker image here that supports AWS CLI
-    steps:
-      # Checkout code from git
-      - run:
-          name: Install dependencies
-          command: |
-            # your code here
-      - run:
-          name: Get backend url
-          command: |
-            # your code here
-            export API_URL="http://${BACKEND_IP}:3030"
-            echo "${API_URL}"
-      - run:
-          name: Deploy frontend objects
-          command: |
-            # your code here
-      # Here's where you will add some code to rollback on failure      
-                    
-  deploy-backend:
-    docker:
-      # Docker image here that supports Ansible
-    steps:
-      # Checkout code from git
-      # Add ssh keys with fingerprint
-      # attach workspace
-      - run:
-          name: Install dependencies
-          command: |
-            # your code here
-      - run:
-          name: Deploy backend
-          command: |
-            # your code here
-      # Here's where you will add some code to rollback on failure  
+     docker:
+       - image: sleavely/node-awscli:14.x
+     steps:
+       - checkout
+       - attach_workspace:
+           at: /root
 
-  smoke-test:
-    docker:
-      # Lightweight Docker image 
-    steps:
-      # Checkout code from git
-      - run:
-          name: Install dependencies
-          command: |
-            # your code here
-      - run:
-          name: Get backend url
-          command: |
-            # your code here
-      - run:
-          name: Backend smoke test.
-          command: |
-            # your code here
-      - run:
-          name: Frontend smoke test.
-          command: |
-            # your code here
-      # Here's where you will add some code to rollback on failure  
+       - run:
+           name: Get backend url
+           command: |
+             API_URL=$(curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/backend_url --request GET)
+             echo $API_URL
+             echo "${API_URL}"
+             echo "NODE_ENV=production" >> frontend/.env
+             echo "API_URL=${API_URL}" >> frontend/.env
+             cat frontend/.env
+            #    curl -H "Content-Type: text/plain" \
+            #  -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" \
+            #  --request GET \
+            #  https://api.memstash.io/values/backend_url)
+       - run:
+           name: Deploy frontend objects
+           working_directory: ./frontend
+           command: |
+             npm i
+             npm run build
+             ls -l
+             aws s3 cp ./dist "s3://udapeople-${CIRCLE_WORKFLOW_ID:0:7}" --recursive
+       # Here's where you will add some code to rollback on failure
+       - destroy-environment:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
+
+  deploy-backend:
+     docker:
+       - image: python:3.7-alpine3.11
+         environment:
+           NODE_ENV: "local"
+           VERSION: "1"
+           ENVIRONMENT: "production"
+           TYPEORM_CONNECTION: $TYPEORM_CONNECTION
+           TYPEORM_HOST: $TYPEORM_HOST
+           TYPEORM_USERNAME: $TYPEORM_USERNAME
+           TYPEORM_PASSWORD: $TYPEORM_PASSWORD
+           TYPEORM_DATABASE: $TYPEORM_DATABASE
+           TYPEORM_PORT: $TYPEORM_PORT
+           TYPEORM_ENTITIES: $TYPEORM_ENTITIES
+     steps:
+       - checkout
+       - add_ssh_keys:
+           fingerprints: ["2f:b8:6e:02:57:ed:72:5e:21:f9:75:03:95:67:02:bb"]
+       - attach_workspace:
+           at: /root
+       - run:
+           name: Install dependencies
+           command: |
+             apk add --update ansible rsync 
+             apk add curl
+             pip3 install awscli
+       - run:
+           name: Deploy backend
+           command: |
+             ls /root
+             ls /root/project/backend/
+             cat ~/project/.circleci/ansible/inventory.txt
+             ansible-playbook -i ~/project/.circleci/ansible/inventory.txt ~/project/.circleci/ansible/deploy-backend.yml
+      #  Here's where you will add some code to rollback on failure
+       - destroy-environment:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
+
+   smoke-test:
+      docker:
+        - image: python:3.7-alpine3.11
+      steps:
+        - checkout
+        - attach_workspace:
+            at: /root
+        - run:
+            name: Install dependencies
+            command: |
+              apk add --update curl
+              pip install awscli
+        - run:
+            name: Backend smoke test
+            command: |
+              ls 
+              pwd
+              export backend_url=$(curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/backend_url --request GET)
+              echo "${backend_url}"
+              curl "${backend_url}/api/status"
+             #    curl -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" \
+             #  --request GET https://api.memstash.io/values/backend_url)
+        - run:
+            name: Frontend smoke test.
+            command: |
+              URL="http://udapeople-${CIRCLE_WORKFLOW_ID:0:7}.s3-website-us-east-1.amazonaws.com"
+              if curl -s ${URL} | grep "Welcome"
+              then
+                return 0
+              else
+                return 1
+              fi
+        - destroy-environment:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
+        - revert-migrations:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
 
   cloudfront-update:
-    docker:
-      # Docker image here that supports AWS CLI
-    steps:
-      # Checkout code from git
-      - run:
-          name: Install dependencies
-          command: |
-            # your code here
-      - run:
-          name: Update cloudfront distribution
-          command: |
-            # your code here
-      # Here's where you will add some code to rollback on failure  
+     docker:
+       - image: amazon/aws-cli
+     steps:
+       - checkout
+       - run:
+           name: get old workflow for clean
+           command: |
+             WorkflowID=$(aws cloudformation \
+             list-exports --query "Exports[?Name==\`WorkflowID\`].Value" \
+             --no-paginate --output text)
+             curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/workflowid -d '$WorkflowID'
+            #  curl -H "Content-Type: text/plain" -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" --request PUT --data "$WorkflowID" https://api.memstash.io/values/workflowid
+       - run:
+           name: Update cloudfront distribution
+           command: |
+             aws cloudformation deploy \
+               --template-file .circleci/files/cloudfront.yml \
+               --tags project=circleci-${CIRCLE_WORKFLOW_ID:0:7} \
+               --stack-name "InitialStack" \
+               --tags project=udapeople\
+               --parameter-overrides WorkflowID="${CIRCLE_WORKFLOW_ID:0:7}"
+      #  Here's where you will add some code to rollback on failure
+       - revert-migrations:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
+       - destroy-environment:
+           workflow_id: ${CIRCLE_WORKFLOW_ID:0:7}
 
-cleanup:
-    docker:
-      # Docker image here
-    steps:
-      # Checkout code from git
-      - run:
-          name: Get old stack workflow id
-          command: |
-            # your code here
-            export OldWorkflowID="the id here"
-            export STACKS=[] #put the list of stacks here
-      - run:
-          name: Remove old stacks and files
-          command: |
-            if [[ "${STACKS[@]}" =~ "${OldWorkflowID}" ]]
-            then
-              # your code here
-            fi
-            
+   cleanup:
+      docker:
+        - image: amazon/aws-cli
+      steps:
+        - checkout
+        - run:
+            name: Remove old stacks and files
+            command: |
+              OldWorkflowID=$(curl https://kvdb.io/42mV4KeiPmRdBdCu4LhNtH/workflowid -d '1')
+               #  curl -H "token: ecdfc255-81e1-4056-9efa-2d7fa10812e1" --request GET https://api.memstash.io/values/workflowid)
+              CurrentWorkflowID=${CIRCLE_WORKFLOW_ID:0:7}
+              if [[ $OldWorkflowID == "" ]]
+              then
+              echo "No workflow id found"
+              else
+              if [[ "$CurrentWorkflowID" != "$OldWorkflowID" ]]
+              then
+                echo "$OldWorkflowID!=$CurrentWorkflowID => will delete old version"
+                aws s3 rm "s3://udapeople-${OldWorkflowID}" --recursive
+                aws cloudformation delete-stack --stack-name "udapeople-frontend-${OldWorkflowID}"
+                aws cloudformation delete-stack --stack-name "udapeople-backend-${OldWorkflowID}"
+              fi
+              fi
 
 workflows:
   default:
@@ -283,18 +445,20 @@ workflows:
           requires: [test-frontend, test-backend, scan-frontend, scan-backend]
           filters:
             branches:
-              only: [test-feature-branch]
+              only: [main]
       - configure-infrastructure:
           requires: [deploy-infrastructure]
       - run-migrations:
           requires: [configure-infrastructure]
-      - deploy-frontend:
-          requires: [run-migrations]
       - deploy-backend:
-          requires: [run-migrations]
-      - smoke-test:
-          requires: [deploy-backend, deploy-frontend]
+          requires:
+            - run-migrations
+      - deploy-frontend:
+          requires:
+            - run-migrations
+       - smoke-test:
+           requires: [deploy-backend, deploy-frontend]
       - cloudfront-update:
-          requires: [smoke-test]
-      - cleanup:
-          requires: [cloudfront-update]
+           requires: [smoke-test]
+        - cleanup:
+            requires: [cloudfront-update]
